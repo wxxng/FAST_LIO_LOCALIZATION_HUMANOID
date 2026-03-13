@@ -1,5 +1,6 @@
 ## 📢 Updates
 
+- 🎉 **2026-03-13** : ROS2 (Jazzy) version now supported, please check the Jazzy branch.
 - 🎉 **2025-12-01** : ROS2 (Humble) version already supports this , please check the Humble branch.
 
 ## 0. Highlight
@@ -58,14 +59,15 @@ Yihao Xu, Xin Li, Zhongxia Zhao, Gaohao Zhou, Dongliang Li, Xiang An, Huajie Tan
 * Ubuntu 18.04 for ROS Melodic
 * Ubuntu 20.04 for ROS Noetic
 * Ubuntu 22.04 for ROS Humble
+* Ubuntu 24.04 for ROS Jazzy (use the `jazzy` branch)
 
-The following processes have been tested in a pure Ubuntu 20.04 / 22.04 virtual machine.
+The following processes have been tested in a pure Ubuntu 20.04 / 22.04 virtual machine, and Ubuntu 24.04 (Jazzy branch).
 
 ### 1.2. PCL & Eigen & C++
 
 Install LLVM C++ Standard library by following command.
 
-```
+```bash
 sudo apt install libc++-dev libc++abi-dev
 ```
 
@@ -73,20 +75,39 @@ For ROS Melodic and ROS Noetic, the default PCL and Eigen is enough.
 
 Install Eigen by following command.
 
-```
+```bash
 sudo apt-get install libeigen3-dev
+```
+
+For **ROS2 Jazzy (Ubuntu 24.04)**, install additional dependencies:
+
+```bash
+sudo apt install libeigen3-dev libpcl-dev \
+  ros-jazzy-pcl-ros ros-jazzy-pcl-conversions \
+  ros-jazzy-tf2-ros ros-jazzy-tf2-eigen ros-jazzy-tf2-geometry-msgs \
+  ros-jazzy-tf2-sensor-msgs ros-jazzy-cv-bridge ros-jazzy-image-transport \
+  libboost-filesystem-dev libboost-system-dev \
+  libyaml-cpp-dev libopencv-dev
 ```
 
 ### 1.3. Open3D
 
-Recommend use the precompiled Open3D library we provided. It can be downloaded from [Baidu Netdisk](link: https://pan.baidu.com/s/1vTLXVYJ6JBlbhNpDf87Cdg?pwd=spdg pwd: spdg), ``open3d141.zip``(tested) can be used for x86 architecture and ``open3d141_arm.zip``(not fully tested) can be used for arm architecture.
+Recommend using the precompiled Open3D library provided. Download from [Baidu Netdisk](https://pan.baidu.com/s/1vTLXVYJ6JBlbhNpDf87Cdg?pwd=spdg) (pwd: `spdg`):
 
-Open [open3d_loc/CMakeLists.txt](open3d_loc/CMakeLists.txt), replace ``Open3D_DIR`` by the folder where you unziped open3d141.zip.
+- `open3d141.zip` — x86 architecture (Ubuntu 20.04 / 22.04 / **24.04**)
+- `open3d141_arm.zip` — ARM architecture (not fully tested)
 
+**Install (all distros including Jazzy):**
+
+```bash
+# Unzip to home directory
+unzip open3d141.zip -d ~/
+
+# Set environment variable before building (add to ~/.bashrc to make permanent)
+export OPEN3D_DIR=~/open3d141/lib/cmake/Open3D
 ```
-#For example
-set(Open3D_DIR "/home/liar/open3d141/lib/cmake/Open3D")
-```
+
+The `CMakeLists.txt` will automatically pick up `$OPEN3D_DIR`. No need to manually edit the file.
 
 Or, build from source by yourself, follow the guidance of installation in the [Open3D documentation/Build from source](https://www.open3d.org/docs/release/compilation.html).
 
@@ -94,33 +115,69 @@ Or, build from source by yourself, follow the guidance of installation in the [O
 
 Follow the guidance of installation in the [Livox-SDK2](https://github.com/Livox-SDK/Livox-SDK2)
 
-### 1.5 Livox-SDK & livox_ros_driver (for fast_lio)
+### 1.5 Livox-SDK & livox_ros_driver (ROS1 only, skip for ROS2)
 
-Since the fast_lio must support Livox serials LiDAR firstly, so the **livox_ros_driver** must be installed
+> **ROS2 Humble / Jazzy users: skip this section.** Livox-SDK2 (section 1.4) + `livox_ros_driver2` is all you need.
 
-Follow the guidance of installation in the [Livox-SDK](https://github.com/Livox-SDK/Livox-SDK) and [livox_ros_driver](https://github.com/Livox-SDK/livox_ros_driver)
+For ROS1 (Noetic) only: follow the guidance of installation in the [Livox-SDK](https://github.com/Livox-SDK/Livox-SDK) and [livox_ros_driver](https://github.com/Livox-SDK/livox_ros_driver)
 
 ## 2. Build
 
+### 2.1 ROS1 (Noetic)
+
 Source livox_ros_driver before build (for fast_lio).
 
-```
-#In the same terminal
-
-#Source livox_ros_driver before every build
+```bash
+# Source livox_ros_driver before every build
 cd ~/ws_livox/
 source devel/setup.bash
 
-#The first build requires a new workspace
+# The first build requires a new workspace
 mkdir -p ~/ws_loc/src
 
-#Get code
+# Get code
 cd ~/ws_loc/src
 git clone https://github.com/deepglint/FAST_LIO_LOCALIZATION_HUMANOID.git
 cd ..
 
-#Build
+# Build
 catkin_make -DROS_EDITION=ROS1
+```
+
+### 2.2 ROS2 Humble / Jazzy (Ubuntu 22.04 / 24.04)
+
+> **Prerequisites:** Livox-SDK2 (section 1.4) and Open3D (section 1.3) must be installed first.
+
+```bash
+# Create workspace
+mkdir -p ~/ws_loc/src
+cd ~/ws_loc/src
+
+# Clone this repo (jazzy branch) and livox_ros_driver2
+git clone -b jazzy https://github.com/deepglint/FAST_LIO_LOCALIZATION_HUMANOID.git
+git clone https://github.com/Livox-SDK/livox_ros_driver2.git
+cd livox_ros_driver2 && git checkout ros2  # use ROS2 branch
+cd ~/ws_loc/src
+
+# Set Open3D path (must be set before building)
+export OPEN3D_DIR=~/open3d/lib/cmake/Open3D  # adjust path if installed elsewhere
+
+# Build
+cd ~/ws_loc
+colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
+source install/setup.bash
+```
+
+### 2.3 Running (ROS2 Jazzy)
+
+```bash
+source ~/ws_loc/install/setup.bash
+
+# Run localization (set map_file to your .pcd or .ply map)
+ros2 launch open3d_loc localization_3d_g1.launch.py map_file:=/path/to/your/map.ply
+
+# Run livox driver (in a separate terminal)
+ros2 launch livox_ros_driver2 msg_MID360_launch.py
 ```
 
 ## 3. Parameter Configuration

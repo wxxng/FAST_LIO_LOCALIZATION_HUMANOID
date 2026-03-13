@@ -1,30 +1,42 @@
+import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node, SetParameter
+from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    # 获取包路径
+    # Get package path
     open3d_loc_share = FindPackageShare('open3d_loc')
 
-    # 声明 use_sim_time 参数
+    # Declare use_sim_time argument
     use_sim_time_arg = DeclareLaunchArgument(
         'use_sim_time',
         default_value='false',
         description='Use simulation time'
     )
 
-    # 配置文件路径
+    # Declare map file path argument
+    # Change default_value to your map file path (.pcd or .ply)
+    map_file_arg = DeclareLaunchArgument(
+        'map_file',
+        default_value=os.path.join(
+            os.path.expanduser('~'),
+            'ws_loc', 'src', 'FAST_LIO_LOCALIZATION_HUMANOID', 'data', 'map.ply'
+        ),
+        description='Path to point cloud map file (.pcd or .ply)'
+    )
+
+    # Config file path
     config_file = PathJoinSubstitution([
         open3d_loc_share,
         'config',
         'loc_param_g1.yaml'
     ])
 
-    # 地图文件路径 - 使用绝对路径指向源码目录中的地图文件
-    map_file = '/home/sax/GO2_Localization_ROS2/src/GO2_Localization_ROS2/data/1.test.ply'
+    # Map file path from argument
+    map_file = LaunchConfiguration('map_file')
 
     # 静态TF发布节点 - camera_init to odom
     static_tf_camera_init2odom = Node(
@@ -106,6 +118,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         use_sim_time_arg,
+        map_file_arg,
         static_tf_camera_init2odom,
         static_tf_imulink2baselink,
         static_tf_base_center,

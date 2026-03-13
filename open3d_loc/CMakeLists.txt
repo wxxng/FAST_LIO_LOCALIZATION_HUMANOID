@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.8)
 project(open3d_loc)
 
-# Default to C++14
+# Default to C++17 (required by Open3D 1.4.1 and ROS Jazzy)
 if(NOT CMAKE_CXX_STANDARD)
-        set(CMAKE_CXX_STANDARD 14)
+        set(CMAKE_CXX_STANDARD 17)
 endif()
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -39,7 +39,15 @@ find_package(OpenCV REQUIRED)
 find_package(Boost REQUIRED COMPONENTS filesystem system)
 
 # Set Open3D path - modify this to your installation path
-set(Open3D_DIR "/home/sax/open3d141/lib/cmake/Open3D")
+# Ubuntu 24.04 / ROS Jazzy (x86):
+#   Download open3d141.zip from Baidu Netdisk and unzip, then set path below
+# Example: set(Open3D_DIR "/home/<yourname>/open3d141/lib/cmake/Open3D")
+if(DEFINED ENV{OPEN3D_DIR})
+  set(Open3D_DIR $ENV{OPEN3D_DIR})
+elseif(NOT Open3D_DIR)
+  set(Open3D_DIR "/home/$ENV{USER}/open3d141/lib/cmake/Open3D")
+endif()
+message(STATUS "Open3D_DIR: ${Open3D_DIR}")
 
 # set(Open3D_DIR "/home/unitree/open3d141_arm/open3d141/lib/cmake/Open3D")
 find_package(Open3D REQUIRED)
@@ -62,7 +70,8 @@ foreach(target Open3D::Open3D Open3D::3rdparty_filament Open3D::3rdparty_glfw Op
                                 # Skip problematic libraries
                                 if(NOT "${lib}" MATCHES ".*librt\\.so.*" AND
                                         NOT "${lib}" MATCHES ".*libc\\+\\+\\.so.*" AND
-                                        NOT "${lib}" MATCHES ".*libc\\+\\+abi\\.so.*")
+                                        NOT "${lib}" MATCHES ".*libc\\+\\+abi\\.so.*" AND
+                                        NOT "${lib}" MATCHES ".*libatomic\\.so.*")
                                         list(APPEND FILTERED_LIBS ${lib})
                                 endif()
                         endforeach()
