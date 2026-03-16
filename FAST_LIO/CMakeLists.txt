@@ -131,8 +131,18 @@ install(TARGETS fastlio_mapping
   DESTINATION lib/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  scripts/object_pose_bridge.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 install(
   DIRECTORY config launch rviz
+  DESTINATION share/${PROJECT_NAME}
+)
+
+install(
+  DIRECTORY data
   DESTINATION share/${PROJECT_NAME}
 )
 
