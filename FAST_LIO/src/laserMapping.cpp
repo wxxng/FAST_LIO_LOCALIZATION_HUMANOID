@@ -44,6 +44,7 @@
 #include <so3_math.h>
 #include <rclcpp/rclcpp.hpp>
 #include <Eigen/Core>
+#include <Eigen/Geometry>
 #include "IMU_Processing.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -55,6 +56,7 @@
 #include <pcl/io/pcd_io.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -86,7 +88,7 @@ mutex mtx_buffer;
 condition_variable sig_buffer;
 
 string root_dir = ROOT_DIR;
-string map_file_path, lid_topic, imu_topic;
+string map_file_path, lid_topic, imu_topic, joint_states_topic;
 
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
@@ -140,6 +142,41 @@ nav_msgs::msg::Path path;
 nav_msgs::msg::Odometry odomAftMapped;
 geometry_msgs::msg::Quaternion geoQuat;
 geometry_msgs::msg::PoseStamped msg_body_pose;
+geometry_msgs::msg::PoseStamped msg_torso_pose;
+geometry_msgs::msg::PoseStamped msg_d435_pose;
+bool publish_origin_initialized = false;
+bool publish_origin_pending = false;
+V3D publish_origin_pos(Zero3d);
+Eigen::Quaterniond publish_origin_quat = Eigen::Quaterniond::Identity();
+double publish_origin_start_time = 0.0;
+constexpr double PUBLISH_ORIGIN_DELAY_SEC = 1.0;
+const Eigen::Isometry3d kTorsoToMid360 = []()
+{
+    Eigen::Isometry3d tf = Eigen::Isometry3d::Identity();
+    tf.translation() = Eigen::Vector3d(0.0002835, 0.00003, 0.41618);
+    tf.linear() = (Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitX()) *
+                   Eigen::AngleAxisd(0.04014257279586953, Eigen::Vector3d::UnitY()) *
+                   Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitZ()))
+                      .toRotationMatrix();
+    return tf;
+}();
+const Eigen::Isometry3d kTorsoToD435 = []()
+{
+    Eigen::Isometry3d tf = Eigen::Isometry3d::Identity();
+    tf.translation() = Eigen::Vector3d(0.0576235, 0.01753, 0.42987);
+    tf.linear() = (Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitX()) *
+                   Eigen::AngleAxisd(0.8307767239493009, Eigen::Vector3d::UnitY()) *
+                   Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitZ()))
+                      .toRotationMatrix();
+    return tf;
+}();
+struct WaistJointState
+{
+    double yaw = 0.0;
+    double roll = 0.0;
+    double pitch = 0.0;
+    bool received = false;
+};
 
 shared_ptr<Preprocess> p_pre(new Preprocess());
 shared_ptr<ImuProcess> p_imu(new ImuProcess());
@@ -166,6 +203,118 @@ inline void dump_lio_state_to_log(FILE *fp)
     fprintf(fp, "%lf %lf %lf ", state_point.grav[0], state_point.grav[1], state_point.grav[2]); // Bias_a
     fprintf(fp, "\r\n");
     fflush(fp);
+}
+
+Eigen::Quaterniond get_current_body_quat()
+{
+    return Eigen::Quaterniond(geoQuat.w, geoQuat.x, geoQuat.y, geoQuat.z);
+}
+
+bool update_publish_origin_if_ready()
+{
+    if (publish_origin_initialized)
+    {
+        return true;
+    }
+
+    if (!publish_origin_pending)
+    {
+        publish_origin_pending = true;
+        publish_origin_start_time = lidar_end_time;
+        return false;
+    }
+
+    if ((lidar_end_time - publish_origin_start_time) < PUBLISH_ORIGIN_DELAY_SEC)
+    {
+        return false;
+    }
+
+    publish_origin_pos = state_point.pos;
+    publish_origin_quat = get_current_body_quat();
+    publish_origin_initialized = true;
+    return true;
+}
+
+V3D rebase_world_position(const V3D &world_pos)
+{
+    if (!publish_origin_initialized)
+    {
+        return world_pos;
+    }
+
+    return publish_origin_quat.conjugate() * (world_pos - publish_origin_pos);
+}
+
+Eigen::Quaterniond rebase_world_orientation(const Eigen::Quaterniond &world_quat)
+{
+    if (!publish_origin_initialized)
+    {
+        return world_quat;
+    }
+
+    return publish_origin_quat.conjugate() * world_quat;
+}
+
+Eigen::Isometry3d get_rebased_body_isometry()
+{
+    Eigen::Isometry3d body_tf = Eigen::Isometry3d::Identity();
+    body_tf.translation() = rebase_world_position(state_point.pos);
+    body_tf.linear() = rebase_world_orientation(get_current_body_quat()).toRotationMatrix();
+    return body_tf;
+}
+
+Eigen::Isometry3d get_body_to_lidar_isometry()
+{
+    Eigen::Isometry3d body_to_lidar = Eigen::Isometry3d::Identity();
+    body_to_lidar.translation() = Eigen::Vector3d(state_point.offset_T_L_I(0), state_point.offset_T_L_I(1), state_point.offset_T_L_I(2));
+    body_to_lidar.linear() = state_point.offset_R_L_I.toRotationMatrix();
+    return body_to_lidar;
+}
+
+Eigen::Isometry3d get_torso_to_pelvis_isometry(const WaistJointState &waist)
+{
+    Eigen::Isometry3d pelvis_to_waist_yaw = Eigen::Isometry3d::Identity();
+    pelvis_to_waist_yaw.linear() = Eigen::AngleAxisd(waist.yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+
+    Eigen::Isometry3d waist_yaw_to_waist_roll = Eigen::Isometry3d::Identity();
+    waist_yaw_to_waist_roll.translation() = Eigen::Vector3d(-0.0039635, 0.0, 0.044);
+    waist_yaw_to_waist_roll.linear() = Eigen::AngleAxisd(waist.roll, Eigen::Vector3d::UnitX()).toRotationMatrix();
+
+    Eigen::Isometry3d waist_roll_to_torso = Eigen::Isometry3d::Identity();
+    waist_roll_to_torso.linear() = Eigen::AngleAxisd(waist.pitch, Eigen::Vector3d::UnitY()).toRotationMatrix();
+
+    const Eigen::Isometry3d pelvis_to_torso = pelvis_to_waist_yaw * waist_yaw_to_waist_roll * waist_roll_to_torso;
+    return pelvis_to_torso.inverse();
+}
+
+void set_pose_from_isometry(geometry_msgs::msg::Pose &pose, const Eigen::Isometry3d &tf)
+{
+    pose.position.x = tf.translation().x();
+    pose.position.y = tf.translation().y();
+    pose.position.z = tf.translation().z();
+
+    Eigen::Quaterniond quat(tf.rotation());
+    pose.orientation.x = quat.x();
+    pose.orientation.y = quat.y();
+    pose.orientation.z = quat.z();
+    pose.orientation.w = quat.w();
+}
+
+void rebase_pointcloud(PointCloudXYZI &cloud)
+{
+    if (!publish_origin_initialized)
+    {
+        return;
+    }
+
+    for (auto &point : cloud.points)
+    {
+        V3D world_pos(point.x, point.y, point.z);
+        V3D rebased_pos = rebase_world_position(world_pos);
+        point.x = rebased_pos(0);
+        point.y = rebased_pos(1);
+        point.z = rebased_pos(2);
+    }
 }
 
 void pointBodyToWorld_ikfom(PointType const *const pi, PointType *const po, state_ikfom &s)
@@ -515,6 +664,7 @@ void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Share
             RGBpointBodyToWorld(&laserCloudFullRes->points[i],
                                 &laserCloudWorld->points[i]);
         }
+        rebase_pointcloud(*laserCloudWorld);
 
         sensor_msgs::msg::PointCloud2 laserCloudmsg;
         pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
@@ -586,6 +736,7 @@ void publish_effect_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Shar
         RGBpointBodyToWorld(&laserCloudOri->points[i],
                             &laserCloudWorld->points[i]);
     }
+    rebase_pointcloud(*laserCloudWorld);
     sensor_msgs::msg::PointCloud2 laserCloudFullRes3;
     pcl::toROSMsg(*laserCloudWorld, laserCloudFullRes3);
     laserCloudFullRes3.header.stamp = get_ros_time(lidar_end_time);
@@ -607,8 +758,11 @@ void publish_map(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub
     }
     *pcl_wait_pub += *laserCloudWorld;
 
+    PointCloudXYZI::Ptr laserCloudPublish(new PointCloudXYZI(*pcl_wait_pub));
+    rebase_pointcloud(*laserCloudPublish);
+
     sensor_msgs::msg::PointCloud2 laserCloudmsg;
-    pcl::toROSMsg(*pcl_wait_pub, laserCloudmsg);
+    pcl::toROSMsg(*laserCloudPublish, laserCloudmsg);
     // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
     laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
     laserCloudmsg.header.frame_id = "camera_init";
@@ -630,13 +784,46 @@ void save_to_pcd()
 template <typename T>
 void set_posestamp(T &out)
 {
-    out.pose.position.x = state_point.pos(0);
-    out.pose.position.y = state_point.pos(1);
-    out.pose.position.z = state_point.pos(2);
-    out.pose.orientation.x = geoQuat.x;
-    out.pose.orientation.y = geoQuat.y;
-    out.pose.orientation.z = geoQuat.z;
-    out.pose.orientation.w = geoQuat.w;
+    V3D rebased_pos = rebase_world_position(state_point.pos);
+    Eigen::Quaterniond rebased_quat = rebase_world_orientation(get_current_body_quat());
+
+    out.pose.position.x = rebased_pos(0);
+    out.pose.position.y = rebased_pos(1);
+    out.pose.position.z = rebased_pos(2);
+    out.pose.orientation.x = rebased_quat.x();
+    out.pose.orientation.y = rebased_quat.y();
+    out.pose.orientation.z = rebased_quat.z();
+    out.pose.orientation.w = rebased_quat.w();
+}
+
+void publish_link_pose(const rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr &publisher,
+                       geometry_msgs::msg::PoseStamped &message,
+                       const Eigen::Isometry3d &link_tf)
+{
+    message.header.stamp = get_ros_time(lidar_end_time);
+    message.header.frame_id = "camera_init";
+    set_pose_from_isometry(message.pose, link_tf);
+    publisher->publish(message);
+}
+
+void publish_link_tf(std::unique_ptr<tf2_ros::TransformBroadcaster> &tf_br,
+                     const std::string &child_frame_id,
+                     const Eigen::Isometry3d &link_tf)
+{
+    geometry_msgs::msg::TransformStamped transform;
+    transform.header.frame_id = "camera_init";
+    transform.header.stamp = get_ros_time(lidar_end_time);
+    transform.child_frame_id = child_frame_id;
+    transform.transform.translation.x = link_tf.translation().x();
+    transform.transform.translation.y = link_tf.translation().y();
+    transform.transform.translation.z = link_tf.translation().z();
+
+    Eigen::Quaterniond quat(link_tf.rotation());
+    transform.transform.rotation.x = quat.x();
+    transform.transform.rotation.y = quat.y();
+    transform.transform.rotation.z = quat.z();
+    transform.transform.rotation.w = quat.w();
+    tf_br->sendTransform(transform);
 }
 
 void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> &tf_br)
@@ -825,6 +1012,7 @@ public:
         this->declare_parameter<string>("map_file_path", "");
         this->declare_parameter<string>("common.lid_topic", "/livox/lidar");
         this->declare_parameter<string>("common.imu_topic", "/livox/imu");
+        this->declare_parameter<string>("visualization.joint_states_topic", "/g1/joint_states");
         this->declare_parameter<bool>("common.time_sync_en", false);
         this->declare_parameter<double>("common.time_offset_lidar_to_imu", 0.0);
         this->declare_parameter<double>("filter_size_corner", 0.5);
@@ -861,6 +1049,7 @@ public:
         this->get_parameter_or<string>("map_file_path", map_file_path, "");
         this->get_parameter_or<string>("common.lid_topic", lid_topic, "/livox/lidar");
         this->get_parameter_or<string>("common.imu_topic", imu_topic, "/livox/imu");
+        this->get_parameter_or<string>("visualization.joint_states_topic", joint_states_topic, "/g1/joint_states");
         this->get_parameter_or<bool>("common.time_sync_en", time_sync_en, false);
         this->get_parameter_or<double>("common.time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
         this->get_parameter_or<double>("filter_size_corner", filter_size_corner_min, 0.5);
@@ -945,11 +1134,15 @@ public:
             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
         }
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, imu_cbk);
+        sub_joint_states_ = this->create_subscription<sensor_msgs::msg::JointState>(
+            joint_states_topic, 20, std::bind(&LaserMappingNode::joint_states_cbk, this, std::placeholders::_1));
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_1", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body_1", 20);
         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected_1", 20);
         pubLaserCloudMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/Laser_map_1", 20);
         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry_loc", 20);
+        pubTorsoPose_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/torso_link_pose", 20);
+        pubD435Pose_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/d435_link_pose", 20);
         pubPath_ = this->create_publisher<nav_msgs::msg::Path>("/path_1", 20);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
@@ -1077,6 +1270,11 @@ private:
 
             double t_update_end = omp_get_wtime();
 
+            if (!update_publish_origin_if_ready())
+            {
+                return;
+            }
+
             /******* Publish odometry *******/
             publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
 
@@ -1088,6 +1286,14 @@ private:
             /******* Publish points *******/
             if (path_en)
                 publish_path(pubPath_);
+            Eigen::Isometry3d body_tf = get_rebased_body_isometry();
+            Eigen::Isometry3d lidar_tf = body_tf * get_body_to_lidar_isometry();
+            Eigen::Isometry3d torso_tf = lidar_tf * kTorsoToMid360.inverse();
+            Eigen::Isometry3d d435_tf = torso_tf * kTorsoToD435;
+            Eigen::Isometry3d pelvis_tf = torso_tf * get_torso_to_pelvis_isometry(get_latest_waist_joint_state());
+            publish_link_pose(pubTorsoPose_, msg_torso_pose, torso_tf);
+            publish_link_pose(pubD435Pose_, msg_d435_pose, d435_tf);
+            publish_link_tf(tf_broadcaster_, "pelvis", pelvis_tf);
             if (scan_pub_en)
                 publish_frame_world(pubLaserCloudFull_);
             if (scan_pub_en && scan_body_pub_en)
@@ -1130,7 +1336,7 @@ private:
 
     void map_publish_callback()
     {
-        if (map_pub_en)
+        if (map_pub_en && publish_origin_initialized)
             publish_map(pubLaserCloudMap_);
     }
 
@@ -1150,14 +1356,55 @@ private:
         }
     }
 
+    void joint_states_cbk(const sensor_msgs::msg::JointState::SharedPtr msg)
+    {
+        WaistJointState latest;
+        {
+            std::lock_guard<std::mutex> lock(waist_joint_state_mutex_);
+            latest = latest_waist_joint_state_;
+        }
+
+        for (size_t i = 0; i < msg->name.size() && i < msg->position.size(); ++i)
+        {
+            const auto &joint_name = msg->name[i];
+            const double joint_position = msg->position[i];
+
+            if (joint_name == "waist_yaw_joint")
+            {
+                latest.yaw = joint_position;
+            }
+            else if (joint_name == "waist_roll_joint")
+            {
+                latest.roll = joint_position;
+            }
+            else if (joint_name == "waist_pitch_joint")
+            {
+                latest.pitch = joint_position;
+            }
+        }
+
+        latest.received = true;
+        std::lock_guard<std::mutex> lock(waist_joint_state_mutex_);
+        latest_waist_joint_state_ = latest;
+    }
+
+    WaistJointState get_latest_waist_joint_state()
+    {
+        std::lock_guard<std::mutex> lock(waist_joint_state_mutex_);
+        return latest_waist_joint_state_;
+    }
+
 private:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_body_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudEffect_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudMap_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pubTorsoPose_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pubD435Pose_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr sub_joint_states_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox_;
     // rclcpp::Subscription<livox_interfaces::msg::CustomMsg>::SharedPtr sub_pcl_livox_;
@@ -1172,6 +1419,8 @@ private:
     double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
     bool flg_EKF_converged, EKF_stop_flg = 0;
     double epsi[23] = {0.001};
+    std::mutex waist_joint_state_mutex_;
+    WaistJointState latest_waist_joint_state_;
 
     FILE *fp;
     ofstream fout_pre, fout_out, fout_dbg;
