@@ -29,8 +29,11 @@ def generate_launch_description():
     bundle_pose_topic = LaunchConfiguration('bundle_pose_topic')
     object_camera_frame = LaunchConfiguration('object_camera_frame')
     object_world_frame = LaunchConfiguration('object_world_frame')
+    object_torso_frame = LaunchConfiguration('object_torso_frame')
     object_pelvis_frame = LaunchConfiguration('object_pelvis_frame')
     object_anchor_frame = LaunchConfiguration('object_anchor_frame')
+    object_pelvis_world_frame = LaunchConfiguration('object_pelvis_world_frame')
+    object_pelvis_world_z = LaunchConfiguration('object_pelvis_world_z')
     object_frame = LaunchConfiguration('object_frame')
     bundle_pose_is_rdf = LaunchConfiguration('bundle_pose_is_rdf')
     object_cube_size = LaunchConfiguration('object_cube_size')
@@ -76,6 +79,10 @@ def generate_launch_description():
         'object_world_frame', default_value='camera_init',
         description='World frame used for object world pose output'
     )
+    declare_object_torso_frame_cmd = DeclareLaunchArgument(
+        'object_torso_frame', default_value='torso_link',
+        description='Robot torso frame used for object pose output'
+    )
     declare_object_pelvis_frame_cmd = DeclareLaunchArgument(
         'object_pelvis_frame', default_value='pelvis',
         description='Pelvis frame used to lock the pelvis-based world origin'
@@ -83,6 +90,14 @@ def generate_launch_description():
     declare_object_anchor_frame_cmd = DeclareLaunchArgument(
         'object_anchor_frame', default_value='pelvis_init',
         description='Anchored pelvis frame created at the first valid pelvis pose'
+    )
+    declare_object_pelvis_world_frame_cmd = DeclareLaunchArgument(
+        'object_pelvis_world_frame', default_value='pelvis_init_world',
+        description='Shifted pelvis-based world frame used for pelvis/object world pose outputs'
+    )
+    declare_object_pelvis_world_z_cmd = DeclareLaunchArgument(
+        'object_pelvis_world_z', default_value='0.793',
+        description='Z position assigned to pelvis_init in the shifted pelvis-based world frame'
     )
     declare_object_frame_cmd = DeclareLaunchArgument(
         'object_frame', default_value='tracked_object',
@@ -126,8 +141,11 @@ def generate_launch_description():
             'bundle_pose_topic': bundle_pose_topic,
             'camera_frame': object_camera_frame,
             'camera_init_frame': object_world_frame,
+            'torso_frame': object_torso_frame,
             'pelvis_frame': object_pelvis_frame,
             'pelvis_anchor_frame': object_anchor_frame,
+            'pelvis_world_frame': object_pelvis_world_frame,
+            'pelvis_init_world_z': object_pelvis_world_z,
             'tracked_object_frame': object_frame,
             'bundle_pose_is_rdf': bundle_pose_is_rdf,
             'cube_size_x': object_cube_size,
@@ -155,8 +173,11 @@ def generate_launch_description():
     ld.add_action(declare_bundle_pose_topic_cmd)
     ld.add_action(declare_object_camera_frame_cmd)
     ld.add_action(declare_object_world_frame_cmd)
+    ld.add_action(declare_object_torso_frame_cmd)
     ld.add_action(declare_object_pelvis_frame_cmd)
     ld.add_action(declare_object_anchor_frame_cmd)
+    ld.add_action(declare_object_pelvis_world_frame_cmd)
+    ld.add_action(declare_object_pelvis_world_z_cmd)
     ld.add_action(declare_object_frame_cmd)
     ld.add_action(declare_bundle_pose_is_rdf_cmd)
     ld.add_action(declare_object_cube_size_cmd)

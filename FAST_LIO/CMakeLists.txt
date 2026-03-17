@@ -133,6 +133,7 @@ install(TARGETS fastlio_mapping
 
 install(PROGRAMS
   scripts/object_pose_bridge.py
+  scripts/holosoma_pose_bridge.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

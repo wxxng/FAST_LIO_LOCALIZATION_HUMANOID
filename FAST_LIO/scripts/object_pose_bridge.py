@@ -98,8 +98,11 @@ class ObjectPoseBridge(Node):
         self.declare_parameter("bundle_pose_topic", "/bundle_pose")
         self.declare_parameter("camera_frame", "d435_link")
         self.declare_parameter("camera_init_frame", "camera_init")
+        self.declare_parameter("torso_frame", "torso_link")
         self.declare_parameter("pelvis_frame", "pelvis")
         self.declare_parameter("pelvis_anchor_frame", "pelvis_init")
+        self.declare_parameter("pelvis_world_frame", "pelvis_init_world")
+        self.declare_parameter("pelvis_init_world_z", 0.793)
         self.declare_parameter("tracked_object_frame", "tracked_object")
         self.declare_parameter("use_bundle_header_frame", False)
         self.declare_parameter("use_latest_tf", True)
@@ -114,8 +117,11 @@ class ObjectPoseBridge(Node):
         self.bundle_pose_topic = self.get_parameter("bundle_pose_topic").get_parameter_value().string_value
         self.camera_frame = self.get_parameter("camera_frame").get_parameter_value().string_value
         self.camera_init_frame = self.get_parameter("camera_init_frame").get_parameter_value().string_value
+        self.torso_frame = self.get_parameter("torso_frame").get_parameter_value().string_value
         self.pelvis_frame = self.get_parameter("pelvis_frame").get_parameter_value().string_value
         self.pelvis_anchor_frame = self.get_parameter("pelvis_anchor_frame").get_parameter_value().string_value
+        self.pelvis_world_frame = self.get_parameter("pelvis_world_frame").get_parameter_value().string_value
+        self.pelvis_init_world_z = self.get_parameter("pelvis_init_world_z").get_parameter_value().double_value
         self.tracked_object_frame = self.get_parameter("tracked_object_frame").get_parameter_value().string_value
         self.use_bundle_header_frame = self.get_parameter("use_bundle_header_frame").get_parameter_value().bool_value
         self.use_latest_tf = self.get_parameter("use_latest_tf").get_parameter_value().bool_value
@@ -132,7 +138,11 @@ class ObjectPoseBridge(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self.object_pose_camera_init_pub = self.create_publisher(PoseStamped, "/object_pose_camera_init", 20)
+        self.object_pose_torso_pub = self.create_publisher(PoseStamped, "/object_pose_torso", 20)
         self.object_pose_pelvis_init_pub = self.create_publisher(PoseStamped, "/object_pose_pelvis_init", 20)
+        self.pelvis_pose_pelvis_init_pub = self.create_publisher(PoseStamped, "/pelvis_pose_pelvis_init", 20)
+        self.pelvis_pose_world_pub = self.create_publisher(PoseStamped, "/pelvis_pose_world", 20)
+        self.object_pose_world_pub = self.create_publisher(PoseStamped, "/object_pose_world", 20)
         self.marker_pub = self.create_publisher(Marker, "/object_pose_marker", 20)
         self.bundle_pose_sub = self.create_subscription(PoseStamped, self.bundle_pose_topic, self.bundle_pose_cb, 20)
 
@@ -155,6 +165,7 @@ class ObjectPoseBridge(Node):
         if camera_init_from_camera_msg is None:
             return
 
+        torso_from_camera_msg = self.lookup_transform(self.torso_frame, source_camera_frame, lookup_time)
         camera_init_from_pelvis_msg = self.lookup_transform(self.camera_init_frame, self.pelvis_frame, lookup_time)
         if camera_init_from_pelvis_msg is None:
             return
@@ -164,6 +175,14 @@ class ObjectPoseBridge(Node):
         camera_from_object = pose_from_msg(msg)
         if self.bundle_pose_is_rdf:
             camera_from_object = convert_pose_rdf_to_flu(camera_from_object[0], camera_from_object[1])
+
+        torso_from_object = None
+        if torso_from_camera_msg is not None:
+            torso_from_camera = transform_from_msg(torso_from_camera_msg)
+            torso_from_object = compose_transform(
+                torso_from_camera[0], torso_from_camera[1],
+                camera_from_object[0], camera_from_object[1],
+            )
 
         camera_init_from_object = compose_transform(
             camera_init_from_camera[0], camera_init_from_camera[1],
@@ -179,11 +198,31 @@ class ObjectPoseBridge(Node):
         pelvis_anchor_from_camera_init = inverse_transform(
             self.camera_init_from_pelvis_anchor[0], self.camera_init_from_pelvis_anchor[1]
         )
+        pelvis_anchor_from_pelvis = compose_transform(
+            pelvis_anchor_from_camera_init[0], pelvis_anchor_from_camera_init[1],
+            camera_init_from_pelvis[0], camera_init_from_pelvis[1],
+        )
         pelvis_anchor_from_object = compose_transform(
             pelvis_anchor_from_camera_init[0], pelvis_anchor_from_camera_init[1],
             camera_init_from_object[0], camera_init_from_object[1],
         )
+        pelvis_world_from_pelvis_anchor = ((0.0, 0.0, self.pelvis_init_world_z), (0.0, 0.0, 0.0, 1.0))
+        pelvis_world_from_pelvis = compose_transform(
+            pelvis_world_from_pelvis_anchor[0], pelvis_world_from_pelvis_anchor[1],
+            pelvis_anchor_from_pelvis[0], pelvis_anchor_from_pelvis[1],
+        )
+        pelvis_world_from_object = compose_transform(
+            pelvis_world_from_pelvis_anchor[0], pelvis_world_from_pelvis_anchor[1],
+            pelvis_anchor_from_object[0], pelvis_anchor_from_object[1],
+        )
 
+        if torso_from_object is not None:
+            self.publish_pose(
+                self.object_pose_torso_pub,
+                self.torso_frame,
+                output_stamp,
+                torso_from_object,
+            )
         self.publish_pose(
             self.object_pose_camera_init_pub,
             self.camera_init_frame,
@@ -195,6 +234,24 @@ class ObjectPoseBridge(Node):
             self.pelvis_anchor_frame,
             output_stamp,
             pelvis_anchor_from_object,
+        )
+        self.publish_pose(
+            self.pelvis_pose_pelvis_init_pub,
+            self.pelvis_anchor_frame,
+            output_stamp,
+            pelvis_anchor_from_pelvis,
+        )
+        self.publish_pose(
+            self.pelvis_pose_world_pub,
+            self.pelvis_world_frame,
+            output_stamp,
+            pelvis_world_from_pelvis,
+        )
+        self.publish_pose(
+            self.object_pose_world_pub,
+            self.pelvis_world_frame,
+            output_stamp,
+            pelvis_world_from_object,
         )
 
         if self.publish_camera_alias_tf and msg.header.frame_id and msg.header.frame_id != source_camera_frame:
